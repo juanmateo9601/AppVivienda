@@ -415,7 +415,9 @@ def main():
         if not cedula_input.strip():
             st.sidebar.warning("Ingrese una cédula válida.")
         else:
-            st.session_state["cedula_usuario"] = cedula_input.strip()
+            # Normalizar la cédula: quitar espacios internos y externos
+            normalized_cedula = cedula_input.strip().replace(" ", "")
+            st.session_state["cedula_usuario"] = normalized_cedula
 
             # Buscar en el Excel de beneficiarios
             if "beneficiarios_excel" in st.session_state:
@@ -429,11 +431,9 @@ def main():
                     st.sidebar.markdown(f"**Nombre:** {datos_benef['nombre']}")
                     st.sidebar.markdown(f"**Dirección:** {datos_benef['direccion']}")
                     st.sidebar.markdown(f"**Teléfono:** {datos_benef['telefono']}")
-
                 else:
                     st.sidebar.error("No se encontró la cédula en la base.")
 
-    
     if st.sidebar.button("Reiniciar aplicación"):
         st.session_state.clear()  # Limpia todos los valores almacenados
         st.rerun()
@@ -448,7 +448,6 @@ def main():
     st.sidebar.markdown(f"**Valor máximo permitido: ${max_total:,.2f}**")
     st.sidebar.markdown(f"**Valor con DIAGNÓSTICO: ${diagnostico:,.2f}** 🏥")
     
-
     # 🔹 El usuario aún puede reducir el costo con un porcentaje
     max_porcentaje = st.sidebar.number_input(
         "Ingrese el porcentaje de costos a reducir", 
@@ -459,17 +458,16 @@ def main():
         key="max_porcentaje"
     )
 
-
     # 🔹 Calcular el nuevo costo permitido después de la reducción
     st.session_state['max_costo'] = diagnostico * (100 - max_porcentaje) / 100
 
     # 📌 Mostrar el valor final después de la reducción
     st.sidebar.markdown(f"**Costo permitido después de reducción: ${st.session_state['max_costo']:,.2f}**")
     
-
     # 🔹 Continuar con las pantallas de la aplicación
     inicio()
     vista_archivos(st.session_state['max_costo'])
+
 
 @st.cache_data
 def load_pdf(file):
@@ -513,11 +511,13 @@ def vista_archivos(max_total):
     # Si los archivos CSV y Excel están cargados, mostrar la interfaz de modificaciones
     if "resultados_csv" in st.session_state and "costos_excel" in st.session_state:
         st.subheader("Selección de Habitaciones")
-        cedula_filtro = st.session_state.get("cedula_usuario", "").strip()
+        # Normalizamos la cédula (quitando espacios)
+        cedula_filtro = st.session_state.get("cedula_usuario", "").strip().replace(" ", "")
 
+        # Normalizamos también las claves del CSV quitando espacios para lograr coincidencia
         habitaciones = [
             key for key in st.session_state["resultados_csv"].keys()
-            if key.strip().startswith(cedula_filtro + " ") and len(key.strip().split()) > 1 and "piso" not in key.lower()
+            if key.strip().replace(" ", "").startswith(cedula_filtro) and len(key.strip().split()) > 1 and "piso" not in key.lower()
         ]
 
         if not habitaciones:
@@ -651,15 +651,15 @@ def vista_archivos(max_total):
         # FORMATEAR SUBTOTALES COMO MONEDA (SIN DECIMALES) EN LA TABLA
         # ─────────────────────────────────────────────────────────────────────────────
         total_general = sum(subtotales.values())
-        st.sidebar.subheader("Subtotales por Habitación")
+        st.sidebar.subheader("Subtotales por Habitacion")
 
         # Convertir 'subtotales' en DataFrame
         df_subtotales = pd.DataFrame(list(subtotales.items()), columns=["Habitación", "Subtotal ($)"])
         
-        # 1) Redondear a 0 decimales
+        # 1) Redondear a 0 decimales y convertir a entero
         df_subtotales["Subtotal ($)"] = df_subtotales["Subtotal ($)"].round(0).astype(int)
         
-        # 2) Convertir a formato pesos con separador de miles y sin decimales
+        # 2) Aplicar formato de pesos (con separador de miles y sin decimales)
         df_subtotales["Subtotal ($)"] = df_subtotales["Subtotal ($)"].apply(lambda x: f"${x:,.0f}")
 
         # Mostrar en la barra lateral
@@ -667,7 +667,7 @@ def vista_archivos(max_total):
 
         st.sidebar.subheader("Total General")
 
-        # Mostrar el total general con el mismo formato pesos sin decimales
+        # Mostrar el total general con el mismo formato
         if total_general > max_total:
             st.sidebar.markdown(
                 f"<span style='color: red; font-weight: bold;'>Total: ${total_general:,.0f}</span>",
@@ -678,7 +678,7 @@ def vista_archivos(max_total):
             st.sidebar.markdown(f"Total: ${total_general:,.0f}")
             obtener_tabla_habitaciones()
             
-            # 🔹 MODIFICACIÓN: Descargar el archivo Excel generado con la plantilla
+            # Descargar el archivo Excel generado con la plantilla
             if "export_excel" in st.session_state and total_general > 0:
                 try:
                     with open(st.session_state["export_excel"], "rb") as file:
@@ -692,6 +692,7 @@ def vista_archivos(max_total):
                     st.sidebar.error(f"Error al generar el archivo: {str(e)}")
     else:
         st.warning('Ingrese los archivos para iniciar el proceso, en la sección Inicio.')
+
 
 
         
