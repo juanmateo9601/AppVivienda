@@ -13,15 +13,61 @@ import streamlit.components.v1 as components
 from PIL import Image
 from datetime import datetime
 from openpyxl.styles import Alignment
+import os
+from pathlib import Path
+from datetime import datetime
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment
 
 ruta_plantilla = "Plantilla_Turbo_Final.xlsx"
 
+TECNICOS = [
+    {
+        "PROFESIONAL": "Lazaro Alpidio Londoño Londoño",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "70.195.935"
+    },
+    {
+        "PROFESIONAL": "Vannesa Orozco Perez",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "1.020.438.209"
+    },
+    {
+        "PROFESIONAL": "Binis Shirley Viana Padilla",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "43.655.326"
+    },
+    {
+        "PROFESIONAL": "Julian Mauricio Madrid",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "1.035.865.095"
+    },
+    {
+        "PROFESIONAL": "Paola Andrea Álvarez Ramírez",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "44.007.552"
+    },
+    {
+        "PROFESIONAL": "Felipe Agudelo Espitia",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "1.020.411.138"
+    },
+    {
+        "PROFESIONAL": "Jose Rafael Oliveros Mora",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "1.082.947.743"
+    },
+    {
+        "PROFESIONAL": "Santiago Zapata Zuluaga",
+        "CARGO": "Profesional Tecnico",
+        "CEDULA": "1.037.662.712"
+    }
+]
 
 def obtener_tabla_habitaciones():
     if "costos_excel" in st.session_state:
         df_costos = st.session_state["costos_excel"].copy()
 
-        # Filtrar solo las columnas necesarias
         columnas_exportar = [
             "Item",
             "ACTIVIDAD DE OBRA - LISTA DE PRECIOS UNITARIOS",
@@ -30,25 +76,19 @@ def obtener_tabla_habitaciones():
         ]
         df_intermedio = df_costos[columnas_exportar].copy()
 
-        # -----------------------------------------------
-        # 1. Crear la columna 'Categoria' replicando la lógica de "categorias_actividades"
-        # -----------------------------------------------
         categoria_actual = None
         categorias = []
         
         for _, row in df_intermedio.iterrows():
             actividad = str(row["ACTIVIDAD DE OBRA - LISTA DE PRECIOS UNITARIOS"])
-            # Si la actividad es mayúscula, asumimos que es una nueva categoría
             if actividad.isupper():
                 categoria_actual = actividad
                 categorias.append(categoria_actual)
             else:
-                # No es mayúscula, así que sigue perteneciendo a la última categoría
                 categorias.append(categoria_actual)
         
         df_intermedio["Categoria"] = categorias
 
-        # 2. Para cada habitación procesada, creamos una columna con la cantidad usada
         if "resultados_csv" in st.session_state:
             habitaciones_procesadas = [
                 habitacion
@@ -62,18 +102,25 @@ def obtener_tabla_habitaciones():
                     actividad = row["ACTIVIDAD DE OBRA - LISTA DE PRECIOS UNITARIOS"]
                     cantidad_key = f"cantidad_{habitacion}_{actividad}"
                     if cantidad_key in st.session_state:
-                        df_intermedio.at[i, habitacion] = st.session_state[cantidad_key]
+                        val = st.session_state[cantidad_key]
+                        if val == "" or val is None:
+                            val_float = 0.0
+                        else:
+                            try:
+                                val_float = float(val)
+                            except (ValueError, TypeError):
+                                val_float = 0.0
+                        df_intermedio.at[i, habitacion] = val_float
 
-            # 3. Sumar las columnas de habitaciones para obtener 'Total actividad'
+            # ⭕️ Esta línea faltaba y causaba el primer error:
             df_intermedio["Total actividad"] = df_intermedio[habitaciones_procesadas].sum(axis=1)
 
-            # 4. Costo total
+            # 🟢 Corrección del nombre exacto de la columna:
             df_intermedio["Costo total"] = (
                 df_intermedio["Total actividad"] *
-                df_intermedio["Valor Unitario ofertado (**)"]
-            )
+                df_intermedio["Valor Unitario ofertado (**)"
+            ])
 
-            # 5. Crear DataFrame resumen (ahora con la columna 'Categoria')
             df_resumen = df_intermedio[[
                 "Item",
                 "Categoria",
@@ -83,139 +130,210 @@ def obtener_tabla_habitaciones():
                 "Total actividad",
                 "Costo total"
             ]].copy()
+            
+            df_resumen = df_resumen.rename(columns={
+                "Item": "N°",
+                "ACTIVIDAD DE OBRA - LISTA DE PRECIOS UNITARIOS": "DESCRIPCIÓN",
+                "Unidad": "UN",
+                "Total actividad": "CANT INIC",
+                "Valor Unitario ofertado (**)": "VR INIT",
+                "Costo total": "VR TOTAL"
+            })
 
-        # 6. Generar el archivo Excel con la plantilla
-        nueva_ruta = export_to_excel(df_resumen)
+        nueva_ruta = export_to_excel_pure(df_resumen, st.session_state.get("selected_tecnico"))
         st.session_state["export_excel"] = nueva_ruta
 
 
 from openpyxl.styles import Font, Alignment  # Asegúrate de tener esto al inicio del archivo
 
-def export_to_excel(df_summary):
+def export_to_excel_pure(datos_resumen, selected_tecnico=None):
     """
-    Llena la plantilla con las actividades > 0,
-    agrupándolas por la columna 'Categoria' (encabezado en mayúsculas).
-    Formatea las columnas M, N y O como moneda sin decimales; 
-    además, el valor de la columna N se replica en la columna O (Subtotal).
-    Finalmente, se realiza una autosuma de la columna O (desde la fila 31 a la 93)
-    y se almacena en la celda O94.
+    Llena la plantilla con las actividades > 0 desde un DataFrame (o lista de diccionarios),
+    agrupándolas por la columna 'Categoria', inyecta los datos del beneficiario en el encabezado
+    (según la cédula ingresada) y guarda automáticamente el archivo en la carpeta Downloads del usuario.
+    
+    Si se proporciona selected_tecnico, inyecta sus datos en las celdas B99, C100 y B101.
     """
-    ruta_plantilla = os.path.join(os.getcwd(), "Plantilla_Turbo_Final.xlsx")
-    if not os.path.exists(ruta_plantilla):
-        st.error(f"⚠️ No se encontró la plantilla: {ruta_plantilla}")
+    import os
+    from pathlib import Path
+    from datetime import datetime
+    from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    # Comprobar si datos_resumen está vacío (para DataFrame)
+    if datos_resumen is None or (hasattr(datos_resumen, "empty") and datos_resumen.empty):
+        st.error("⚠️ datos_resumen está vacío. No hay datos para exportar.")
         return None
 
-    # Cargar la plantilla correctamente ANTES de usar 'ws'
-    wb = load_workbook(ruta_plantilla)
-    ws = wb.active  # Hoja principal de la plantilla
+    st.write("🔍 Datos con Total actividad calculado:", datos_resumen)
 
-    # ──────────────── Inyectar encabezado del beneficiario ────────────────
-    font_base = Font(name="Times New Roman", size=15)
-
-    if "datos_beneficiario" in st.session_state:
-        try:
-            datos = st.session_state["datos_beneficiario"]
-            ws["F15"] = datos["nombre"]
-            ws["F15"].font = font_base
-
-            ws["F16"] = datos["cedula"]
-            ws["F16"].font = font_base
-
-            ws["B16"] = datos["direccion"]
-            ws["B16"].font = font_base
-
-            ws["F17"] = datos["telefono"]
-            ws["F17"].font = font_base
-            ws["F17"].alignment = Alignment(horizontal="left")
-
-            ws["H5"]  = datos["idhogar"]
-            ws["H5"].font = font_base
-        except Exception as e:
-            st.warning(f"⚠️ Error al inyectar los datos del beneficiario: {e}")
+    # Si datos_resumen es un DataFrame, lo convertimos a lista de diccionarios
+    if hasattr(datos_resumen, "to_dict"):
+        datos_filtrados = datos_resumen.to_dict(orient="records")
     else:
-        st.warning("⚠️ No hay datos del beneficiario cargados.")
+        datos_filtrados = datos_resumen
 
-    # Agregar la fecha actual en H6
-    from datetime import datetime
+    # Filtrar actividades con "Total actividad" > 0
+    datos_filtrados = [fila for fila in datos_filtrados if fila.get("CANT INIC", 0) > 0]
+    if not datos_filtrados:
+        st.warning("⚠️ No hay actividades con valor > 0. El Excel quedará vacío.")
+        return None
+
+    # Obtener la carpeta Downloads del usuario y definir el nombre del archivo
+    downloads_folder = Path.home() / "Downloads"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nueva_ruta = downloads_folder / f"Reporte_Resultado_{timestamp}.xlsx"
+
+    # Función para obtener la ruta de la plantilla
+    def get_plantilla_path():
+        plantilla_path = os.path.join(os.getcwd(), "Plantilla_Turbo_Final.xlsx")
+        if not os.path.exists(plantilla_path):
+            st.error(f"❌ No se encontró la plantilla: {plantilla_path}")
+            return None
+        return plantilla_path
+
+    ruta_plantilla_local = get_plantilla_path()
+    if ruta_plantilla_local is None:
+        return None
+
+    try:
+        wb = load_workbook(ruta_plantilla_local)
+    except Exception as e:
+        st.error(f"Error al cargar la plantilla: {e}")
+        return None
+
+    ws = wb.active
+
+    # Función para concatenar texto nuevo con el contenido original de la celda
+    def append_to_cell(cell_ref, new_text):
+        original = ws[cell_ref].value or ""
+        if cell_ref == "E99":
+            ws[cell_ref].value = f"{original}{new_text}"
+        else:
+            ws[cell_ref].value = f"{original}    {new_text}"
+
+    # Inyectar datos del beneficiario (usando st.session_state)
+    if "cedula_usuario" in st.session_state and "beneficiarios_excel" in st.session_state:
+        cedula_dig = st.session_state["cedula_usuario"].strip()
+        beneficiarios = st.session_state["beneficiarios_excel"]
+
+        beneficiario_encontrado = None
+        if hasattr(beneficiarios, "empty"):  # Si es un DataFrame
+            df_benef = beneficiarios.copy()
+            df_benef["C.C:"] = df_benef["C.C:"].astype(str)
+            df_filtrado = df_benef[df_benef["C.C:"].str.strip() == cedula_dig]
+            if not df_filtrado.empty:
+                beneficiario_encontrado = df_filtrado.iloc[0].to_dict()
+        else:
+            beneficiario_encontrado = next((b for b in beneficiarios 
+                                             if str(b.get("C.C:", "")).strip() == cedula_dig), None)
+
+        if beneficiario_encontrado:
+            append_to_cell("B7", beneficiario_encontrado.get("NOMBRE BENEFICIARIO:", ""))
+            append_to_cell("E99", beneficiario_encontrado.get("NOMBRE BENEFICIARIO:", ""))
+            append_to_cell("B8", beneficiario_encontrado.get("C.C:", ""))
+            append_to_cell("E100", beneficiario_encontrado.get("C.C:", ""))
+            append_to_cell("G7", beneficiario_encontrado.get("ID_HOGAR:", "N/A"))
+            append_to_cell("B9", beneficiario_encontrado.get("TELEFONO:", ""))
+            append_to_cell("D8", beneficiario_encontrado.get("DIRECCION:", ""))
+        else:
+            st.write(f"No se encontró la cédula {cedula_dig} en la base de beneficiarios.")
+
+    # Agregar fecha sin sobrescribir la celda
     fecha_actual = datetime.now().strftime("%d/%m/%Y")
-    ws["H6"] = fecha_actual
-    ws["H6"].alignment = Alignment(horizontal="right")
-    ws["H6"].font = font_base
+    append_to_cell("G4", fecha_actual)
+    append_to_cell("D9", fecha_actual)
 
-    # Obtener celdas combinadas para evitar sobreescritura
+    # Inyectar datos del técnico seleccionado, si se proporcionó
+    if selected_tecnico:
+        ws["B99"] = selected_tecnico.get("PROFESIONAL", "")
+        ws["C100"] = selected_tecnico.get("CEDULA", "")
+        ws["B101"] = selected_tecnico.get("CARGO", "")
+
+    # Identificar celdas combinadas para evitar escribir en ellas
     celdas_combinadas = set()
     for merged_range in ws.merged_cells.ranges:
         for row in ws[merged_range.coord]:
             for cell in row:
                 celdas_combinadas.add(cell.coordinate)
 
-    # 1. Filtrar solo actividades con Total actividad > 0
-    df_filtrado = df_summary[df_summary["Total actividad"] > 0].copy()
-
-    # 2. Si no hay filas, guardar y salir
-    nueva_ruta = os.path.join(os.getcwd(), "Reporte_Resultado.xlsx")
-    if df_filtrado.empty:
-        st.warning("No hay actividades con valor > 0. El Excel quedará vacío.")
-        wb.save(nueva_ruta)
-        return nueva_ruta
-
-    # 3. Obtener el orden de las categorías tal como aparecen en df_filtrado
-    categorias_unicas = list(df_filtrado["Categoria"].dropna().unique())
-
-    # 4. Empezar a escribir en la fila 31 (espacio reservado para encabezados, etc.)
-    current_row = 31
+    # Obtener categorías únicas a partir de los datos filtrados
+    categorias_unicas = list({fila["Categoria"] for fila in datos_filtrados if fila.get("Categoria")})
+    current_row = 14
 
     for cat in categorias_unicas:
-        if not cat:
-            continue
-
-        df_cat = df_filtrado[df_filtrado["Categoria"] == cat]
-        if df_cat.empty:
-            continue
-
-        if f"A{current_row}" not in celdas_combinadas:
-            ws[f"A{current_row}"] = cat
-            ws[f"A{current_row}"].font = font_base
+        ws[f"B{current_row}"] = cat
+        ws[f"B{current_row}"].alignment = Alignment(horizontal="left", indent=2)
+        ws[f"B{current_row}"].fill = PatternFill("solid", fgColor="D3D3D3")
+        ws[f"B{current_row}"].font = Font(color="000000", bold=True)
         current_row += 1
 
-        for _, fila in df_cat.iterrows():
-            col_map = ["A", "B", "E", "F", "G", "H", "I"]
-            valores = [
-                fila["Item"],
-                fila["ACTIVIDAD DE OBRA - LISTA DE PRECIOS UNITARIOS"],
-                fila["Unidad"],
-                fila["Total actividad"],
-                fila["Valor Unitario ofertado (**)"],
-                fila["Costo total"],
-                fila["Costo total"],
-                ""
-            ]
+        # Filtrar actividades de la categoría actual
+        actividades = [f for f in datos_filtrados if f.get("Categoria") == cat]
+        # Ajustar columnas: N° en B, DESCRIPCIÓN en C, UN en D, CANT INIC en E, VR INIT en F, VR TOTAL en G
+        col_map = ["B", "C", "D", "E", "F", "G"]
 
+        for act in actividades:
+            valores = [
+                act.get("N°", ""),
+                act.get("DESCRIPCIÓN", ""),
+                act.get("UN", ""),
+                act.get("CANT INIC", 0.0),
+                act.get("VR INIT (**)", 0.0),
+                act.get("VR TOTAL", 0.0)
+            ]
             for col, val in zip(col_map, valores):
                 celda = f"{col}{current_row}"
                 if celda not in celdas_combinadas:
-                    if col in ["G", "H", "I"]:
+                    if col in ["F", "G"]:
                         try:
-                            valor_num = int(round(float(val)))
-                        except Exception:
-                            valor_num = 0
-                        ws[celda].value = valor_num
-                        ws[celda].number_format = '"$"#,##0'
+                            ws[celda].value = float(val)
+                            ws[celda].number_format = '"$"#,##0'
+                        except (ValueError, TypeError):
+                            ws[celda].value = 0.0
                     else:
                         ws[celda].value = val
-                    ws[celda].font = font_base  # 🔹 APLICAR FUENTE
+                        if col == "B":
+                            ws[celda].font = Font(color="000000", bold=False)
+                            ws[celda].hyperlink = None
             current_row += 1
 
         current_row += 1
 
-    # Autosuma final
-    ws["I94"] = "=SUM(I31:I93)"
-    ws["I94"].number_format = '"$"#,##0'
-    ws["I94"].font = font_base
+    ws["G77"] = "=SUM(G15:G76)"
+    ws["G77"].number_format = '"$"#,##0'
+    
+    ws["G81"] = "=G77*0.12"
+    ws["G81"].number_format = '"$"#,##0.00'
+    
+    ws["G82"] = "=G77*0.016"
+    ws["G82"].number_format = '"$"#,##0.00'
+    
+    ws["G83"] = "=G77+G81+G82"
+    ws["G83"].number_format = '"$"#,##0.00'
+    
+    # Replicar el valor de G83 en G85 considerando celdas fusionadas
+    target = "G85"
+    found = False
+    for merged_range in ws.merged_cells.ranges:
+        if target in merged_range:
+            ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = "=G83"
+            ws.cell(row=merged_range.min_row, column=merged_range.min_col).number_format = '"$"#,##0.00'
+            found = True
+            break
+    if not found:
+        ws[target].value = "=G83"
+        ws[target].number_format = '"$"#,##0.00'
 
-    # Guardar el archivo
-    wb.save(nueva_ruta)
-    return nueva_ruta
+    try:
+        wb.save(nueva_ruta)
+        st.write(f"✅ Reporte guardado automáticamente en: {nueva_ruta}")
+    except Exception as e:
+        st.error(f"❌ Error al guardar el archivo Excel: {e}")
+        return None
+
+    return str(nueva_ruta)
+
 
 
 
@@ -406,6 +524,8 @@ def main():
     
     st.set_page_config(page_title="Modificación de vivienda", layout="wide")
     
+    st.sidebar.markdown("<h2 style='text-align: center; color: green;'>💰 Costo total permitido: $13.201.188</h2>", unsafe_allow_html=True)
+
     st.sidebar.markdown("### Buscar Beneficiario")
 
     cedula_input = st.sidebar.text_input("Ingrese la cédula:", key="input_cedula")
@@ -439,32 +559,25 @@ def main():
         st.rerun()
     
     # 🔹 Valor máximo permitido fijo
-    max_total = 15600000  # 15.600.000
-
-    # 🔹 Restar automáticamente 1.300.000 para obtener el diagnóstico
-    diagnostico = max_total - 1300000  # 15.600.000 - 1.300.000
-
-    # 📌 Mostrar ambos valores en la barra lateral
-    st.sidebar.markdown(f"**Valor máximo permitido: ${max_total:,.2f}**")
-    st.sidebar.markdown(f"**Valor con DIAGNÓSTICO: ${diagnostico:,.2f}** 🏥")
+    max_total = 13201188  # 15.600.000
     
-
-    # 🔹 El usuario aún puede reducir el costo con un porcentaje
-    max_porcentaje = st.sidebar.number_input(
-        "Ingrese el porcentaje de costos a reducir", 
-        min_value=0.0, 
-        max_value=100.0, 
-        format="%.1f", 
-        step=0.1, 
-        key="max_porcentaje"
+    # Inicializar 'max_costo' en st.session_state si no existe
+    if "max_costo" not in st.session_state:
+        st.session_state["max_costo"] = max_total
+    
+    
+    # En la parte de la interfaz (por ejemplo, en la función main() o en la sección de la barra lateral)
+    selected = st.sidebar.selectbox(
+        "Seleccione un Técnico",
+        options=[tec["PROFESIONAL"] for tec in TECNICOS]
     )
+    if selected:
+        # Buscamos el diccionario del técnico seleccionado
+        tecnico_seleccionado = next((tec for tec in TECNICOS if tec["PROFESIONAL"] == selected), None)
+        st.session_state["selected_tecnico"] = tecnico_seleccionado
+        st.sidebar.success(f"Técnico seleccionado: {tecnico_seleccionado['PROFESIONAL']}")
 
 
-    # 🔹 Calcular el nuevo costo permitido después de la reducción
-    st.session_state['max_costo'] = diagnostico * (100 - max_porcentaje) / 100
-
-    # 📌 Mostrar el valor final después de la reducción
-    st.sidebar.markdown(f"**Costo permitido después de reducción: ${st.session_state['max_costo']:,.2f}**")
     
 
     # 🔹 Continuar con las pantallas de la aplicación
@@ -504,7 +617,6 @@ def vista_archivos(max_total):
     if "plano_pdf" in st.session_state:
         st.subheader("Plano PDF")
         pdf_viewer(st.session_state["plano_pdf"], width="50%")
-
     # Mostrar la imagen si el usuario subió una imagen en lugar de un PDF
     elif "plano_img" in st.session_state:
         st.subheader("Plano en Imagen")
@@ -534,9 +646,9 @@ def vista_archivos(max_total):
             subtotal = 0.0
 
             if estados[habitacion]:
-                st.subheader(f"🏠 Modificaciones de {habitacion}")  # Quitamos el expander de habitación
+                st.subheader(f"🏠 Modificaciones de {habitacion}")  # Sin expander para cada habitación
 
-                # Crear un diccionario para almacenar categorías con actividades
+                # Crear diccionario para almacenar categorías con actividades
                 categorias_actividades = {}
                 categoria_actual = None
 
@@ -549,7 +661,7 @@ def vista_archivos(max_total):
                     formula = row.get("FORMULA", "")
                     formula = "" if pd.isna(formula) else formula
 
-                    # Identificar si el título es una categoría (mayúsculas)
+                    # Si es una categoría (título en mayúsculas)
                     if actividad.isupper():
                         categoria_actual = actividad
                         categorias_actividades[categoria_actual] = []
@@ -558,7 +670,7 @@ def vista_archivos(max_total):
                             (item, actividad, unidad, valor_unitario, medicion, formula)
                         )
 
-                # Mostrar las categorías con sus actividades dentro de `st.expander()`
+                # Mostrar las categorías con sus actividades en expander
                 for categoria, lista_actividades in categorias_actividades.items():
                     with st.expander(f"📂 {categoria}", expanded=False):
                         for item, actividad, unidad, valor_unitario, medicion, formula in lista_actividades:
@@ -573,21 +685,31 @@ def vista_archivos(max_total):
                                 if valor_guardado_key not in st.session_state:
                                     st.session_state[valor_guardado_key] = 0.0
 
+                                # Si es una actividad manual (ingreso del usuario)
                                 if "USUARIO" in medicion.upper():
-                                    cantidad = st.number_input(
+                                    # Usar text_input para iniciar vacío
+                                    cantidad_str = st.text_input(
                                         f"Ingrese la cantidad ({unidad}).",
-                                        min_value=0 if unidad in ["UN", "UND"] else 0.00,
+                                        value="",  # Inicia vacío
                                         key=cantidad_key,
-                                        step=1 if unidad in ["UN", "UND"] else 0.0001
+                                        placeholder="Ej: 2.50"
                                     )
                                     if st.button(f"Guardar cantidad", key=f"button_{habitacion}_{actividad}"):
-                                        st.session_state[valor_guardado_key] = cantidad * valor_unitario
-                                        st.success(
-                                            f"Valor guardado para {actividad}: "
-                                            f"${st.session_state[valor_guardado_key]:,.2f}"
-                                        )
+                                        if cantidad_str.strip():
+                                            try:
+                                                cantidad = float(cantidad_str)
+                                                st.session_state[valor_guardado_key] = cantidad * valor_unitario
+                                                st.success(
+                                                    f"Valor guardado para {actividad}: "
+                                                    f"${st.session_state[valor_guardado_key]:,.2f}"
+                                                )
+                                            except ValueError:
+                                                st.error("Por favor, ingresa un número válido.")
+                                        else:
+                                            st.warning("No ingresaste ningún valor.")
 
                                 else:
+                                    # Resto de las ramas: actividades que vienen de MagicPlan
                                     if "ALTURA" in formula:    
                                         cantidad = st.number_input(
                                             f"Valor MagicPlan ({ultimas_dos_palabras(medicion)})",
@@ -616,7 +738,6 @@ def vista_archivos(max_total):
                                                     )
                                                 except ValueError:
                                                     st.error("Por favor, ingresa un número válido para la altura.")
-
                                     elif formula != "":
                                         cantidad = st.number_input(
                                             f"Ingrese la cantidad ({unidad}).",
@@ -656,18 +777,13 @@ def vista_archivos(max_total):
         # Convertir 'subtotales' en DataFrame
         df_subtotales = pd.DataFrame(list(subtotales.items()), columns=["Habitación", "Subtotal ($)"])
         
-        # 1) Redondear a 0 decimales
+        # Redondear y formatear
         df_subtotales["Subtotal ($)"] = df_subtotales["Subtotal ($)"].round(0).astype(int)
-        
-        # 2) Convertir a formato pesos con separador de miles y sin decimales
         df_subtotales["Subtotal ($)"] = df_subtotales["Subtotal ($)"].apply(lambda x: f"${x:,.0f}")
 
-        # Mostrar en la barra lateral
         st.sidebar.dataframe(df_subtotales, hide_index=True)
 
         st.sidebar.subheader("Total General")
-
-        # Mostrar el total general con el mismo formato pesos sin decimales
         if total_general > max_total:
             st.sidebar.markdown(
                 f"<span style='color: red; font-weight: bold;'>Total: ${total_general:,.0f}</span>",
@@ -677,8 +793,6 @@ def vista_archivos(max_total):
         else:
             st.sidebar.markdown(f"Total: ${total_general:,.0f}")
             obtener_tabla_habitaciones()
-            
-            # 🔹 MODIFICACIÓN: Descargar el archivo Excel generado con la plantilla
             if "export_excel" in st.session_state and total_general > 0:
                 try:
                     with open(st.session_state["export_excel"], "rb") as file:
@@ -692,6 +806,7 @@ def vista_archivos(max_total):
                     st.sidebar.error(f"Error al generar el archivo: {str(e)}")
     else:
         st.warning('Ingrese los archivos para iniciar el proceso, en la sección Inicio.')
+
 
 
         
